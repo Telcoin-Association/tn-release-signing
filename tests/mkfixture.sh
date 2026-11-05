@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Fixture of the submodule layout: a project that carries this repository as a submodule.
+#
+#   tests/mkfixture.sh DIR
+#
+# builds, in DIR (new or empty):
+#   gnupg/          GNUPGHOME with the throwaway maintainer key alice (ed25519, no passphrase)
+#   alice.asc       that key, armored; fpr-alice holds its primary fingerprint
+#   gitconfig       the only git configuration the fixture reads (GIT_CONFIG_GLOBAL, no
+#                   system file), so the caller's signing and hook settings stay out
+#   signing-work/   the signing repository: release.sh, README.md and examples/ of this
+#                   checkout, keys/alice.asc and a KEYS.md that requires one signature
+#   signing.git     its bare copy, the submodule's origin
+#   consumer-work/  a cargo package with signing.git as a submodule at release/, a
+#                   release.conf with KEYS_PATH=release/keys and SELF_REPO_PATH=release, and on
+#                   main a base commit and the release commit of v1.2.3
+#   consumer.git    its bare copy, the clone's origin
+#   clone/          git clone --recurse-submodules of consumer.git, at main
+#
+# A test sources this file instead and calls mkfixture DIR, then the fx_* functions to change
+# the fixture further; FX names DIR. The bare repositories are updated with fetch, never push.
+# Bash 3.2 safe; the caller runs it with set -e, as the functions do not check every command.
+# Every git command runs with -C, so the caller's directory is never read (in a container it
+# may be a mounted worktree whose .git file names a path that does not exist there).
+
+FX_SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+FX=
+FX_DATE=2026-11-05
+
+# git that may clone and fetch submodules from local paths (protocol.file.allow is "user"
+# since git 2.38.1, which forbids it for submodules). Only the fixture's own commands use it:
+# release.sh runs with git's defaults.
+fx_git() { git -c protocol.file.allow=always "$@"; }
+
+# fx_init DIR: FX, the keyring and the git configuration.
+fx_init() {
+    mkdir -p "$1"
+    [ -z "$(ls -A "$1")" ] || { printf 'mkfixture: %s is not empty\n' "$1" >&2; return 1; }
+    FX=$(cd "$1" && pwd -P)
+    GNUPGHOME=$FX/gnupg
+    GIT_CONFIG_GLOBAL=$FX/gitconfig
+    GIT_CONFIG_NOSYSTEM=1
+    export GNUPGHOME GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+    mkdir -m 700 "$GNUPGHOME"
+    : >"$GIT_CONFIG_GLOBAL"
+    git -C "$FX" config --global user.name 'Fixture Maintainer'
+    git -C "$FX" config --global user.email fixture@example.invalid
+    git -C "$FX" config --global init.defaultBranch main
+    git -C "$FX" config --global commit.gpgSign false
+    git -C "$FX" config --global tag.gpgSign false
+    git -C "$FX" config --global gpg.program gpg
+    git -C "$FX" config --global advice.detachedHead false
+}
+
+# fx_key HANDLE: a throwaway maintainer key; writes FX/HANDLE.asc and FX/fpr-HANDLE.
+fx_key() {
+    local fpr
+    gpg --batch --quiet --passphrase '' --quick-gen-key "$1 <$1@example.invalid>" ed25519 sign never 2>/dev/null
+    fpr=$(gpg --batch --with-colons --list-keys "<$1@example.invalid>" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+    [ -n "$fpr" ] || { printf 'mkfixture: no key for %s\n' "$1" >&2; return 1; }
+    printf '%s\n' "$fpr" >"$FX/fpr-$1"
+    gpg --batch --armor --export "$fpr" >"$FX/$1.asc"
+}
+
+fx_fpr() { cat "$FX/fpr-$1"; }
+
+# fx_keys_md FILE N: a KEYS.md whose threshold line, in the form release.sh reads, requires N
+# signatures.
+fx_keys_md() {
+    printf '# Maintainer release keys\n\n## Threshold\n\nSignatures required: %s.\n' "$2" >"$1"
+}
+
+# fx_signing_commit BRANCH MESSAGE HANDLE...: puts the keys of HANDLE... into keys/ on BRANCH
+# of the signing repository (a new BRANCH starts at main), commits, updates signing.git and
+# prints the commit.
+fx_signing_commit() {
+    local branch=$1 msg=$2 w=$FX/signing-work h
+    shift 2
+    if git -C "$w" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+        git -C "$w" checkout -q "$branch"
+    else
+        git -C "$w" checkout -q -b "$branch" main
+    fi
+    for h in "$@"; do cp "$FX/$h.asc" "$w/keys/$h.asc"; done
+    git -C "$w" add keys
+    git -C "$w" commit -q -m "$msg"
+    git -C "$FX/signing.git" fetch -q "$w" "+refs/heads/$branch:refs/heads/$branch"
+    git -C "$w" rev-parse HEAD
+}
+
+# fx_pin SHA MESSAGE: commits the consumer's release/ submodule at SHA on the current branch of
+# consumer-work.
+fx_pin() {
+    local w=$FX/consumer-work
+    git -C "$w/release" fetch -q origin
+    git -C "$w/release" checkout -q "$1"
+    git -C "$w" add release
+    git -C "$w" commit -q -m "$2"
+}
+
+# fx_release VERSION: the release commit of vVERSION on the current branch of consumer-work,
+# as the prep step leaves it (version, CHANGELOG section with the release-base marker).
+fx_release() {
+    local w=$FX/consumer-work base
+    base=$(git -C "$w" rev-parse HEAD)
+    sed "s/^version = \".*\"\$/version = \"$1\"/" "$w/Cargo.toml" >"$w/Cargo.toml.new"
+    mv "$w/Cargo.toml.new" "$w/Cargo.toml"
+    printf '# Changelog\n\n<!-- ANCHOR: releases -->\n## [v%s] - %s\n<!-- release-base: %s -->\n\n- release %s\n' \
+        "$1" "$FX_DATE" "$base" "$1" >"$w/CHANGELOG.md"
+    git -C "$w" commit -q -a -m "release: v$1"
+}
+
+# fx_publish BRANCH: copies BRANCH of consumer-work to consumer.git.
+fx_publish() {
+    git -C "$FX/consumer.git" fetch -q "$FX/consumer-work" "+refs/heads/$1:refs/heads/$1"
+}
+
+# fx_tag HANDLE TAG COMMIT: TAG on COMMIT in the clone, signed with HANDLE's key.
+fx_tag() {
+    git -C "$FX/clone" -c gpg.format=openpgp tag -s -u "$(fx_fpr "$1")" -m "Release $2" "$2" "$3"
+}
+
+mkfixture() {
+    local f w
+    fx_init "$1"
+    fx_key alice
+
+    w=$FX/signing-work
+    git -C "$FX" init -q "$w"
+    mkdir -p "$w/keys" "$w/examples"
+    for f in release.sh README.md examples/release.conf; do
+        if [ -f "$FX_SRC/$f" ]; then cp "$FX_SRC/$f" "$w/$f"; fi
+    done
+    cp "$FX/alice.asc" "$w/keys/alice.asc"
+    fx_keys_md "$w/KEYS.md" 1
+    git -C "$w" add -A
+    git -C "$w" commit -q -m 'signing: release.sh and the key of alice'
+    git -C "$FX" init -q --bare "$FX/signing.git"
+    git -C "$FX/signing.git" fetch -q "$w" '+refs/heads/main:refs/heads/main'
+
+    w=$FX/consumer-work
+    git -C "$FX" init -q "$w"
+    fx_git -C "$w" submodule add -q "$FX/signing.git" release
+    cat >"$w/release.conf" <<'EOF'
+# shellcheck shell=bash disable=SC2034 # release.sh reads these values after sourcing the file
+# The fixture consumer: a cargo package that carries tn-release-signing at release/.
+PROJECT=fixture
+DEFAULT_REPO=example/fixture
+TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc[1-9][0-9]*)?$'
+TRIPLE=x86_64-unknown-linux-musl
+TARBALL_FILES='fixture LICENSE'
+VERSION_FILE=Cargo.toml
+CHANGELOG_FILE=CHANGELOG.md
+ANCHOR='<!-- ANCHOR: releases -->'
+MAIN_REF=refs/remotes/origin/main
+ARTIFACT_ROOT=target/release-artifacts
+MIN_SIGNATURES=1
+KEYS_PATH=release/keys
+SELF_REPO_PATH=release
+EOF
+    printf '[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n' >"$w/Cargo.toml"
+    printf '# Changelog\n\n<!-- ANCHOR: releases -->\n' >"$w/CHANGELOG.md"
+    printf 'fixture license\n' >"$w/LICENSE"
+    printf 'target/\n' >"$w/.gitignore"
+    git -C "$w" add -A
+    git -C "$w" commit -q -m base
+    fx_release 1.2.3
+    git -C "$FX" init -q --bare "$FX/consumer.git"
+    fx_publish main
+
+    fx_git -C "$FX" clone -q --recurse-submodules "$FX/consumer.git" "$FX/clone"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    set -euo pipefail
+    [ $# = 1 ] || { printf 'usage: %s DIR\n' "$0" >&2; exit 2; }
+    mkfixture "$1"
+    gpgconf --homedir "$GNUPGHOME" --kill all >/dev/null 2>&1 || true
+    printf 'fixture in %s\n' "$FX"
+fi

@@ -48,6 +48,17 @@
 # hook functions of the "Hooks" section, which do nothing unless it does (hook_build builds
 # with cargo). examples/release.conf describes every key.
 #
+# Layouts: a project commits this script (SELF_REPO_PATH names the file, such as
+# etc/release.sh, and KEYS_PATH a directory of the project) or carries this repository as a
+# submodule (SELF_REPO_PATH names the submodule directory, such as release, and KEYS_PATH a
+# directory inside it, such as release/keys). In the submodule layout MAIN_REF records only
+# the submodule's commit, so the keys and main's copy of this script are read at that commit
+# from the submodule's object store (fetched from its origin when missing), never from the
+# checked-out files, and build and publish require the submodule checked out at that commit.
+# There, every step that reads the keys from main refuses a KEYS_PATH outside the submodule
+# (exit 2) and a MIN_SIGNATURES below the "Signatures required: N" line of the submodule's
+# KEYS.md at that commit (exit 1): KEYS.md states the threshold for every consumer.
+#
 # Environment (all optional):
 #   RELEASE_REPO                   owner/repo; default DEFAULT_REPO, GITHUB_REPOSITORY in CI
 #   RELEASE_COMMIT                 tag: commit to tag instead of the origin/main tip
@@ -341,6 +352,68 @@ check_extra_assets() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# The submodule layout
+#
+# See "Layouts" at the top: MAIN_REF records the submodule at SELF_REPO_PATH as a gitlink
+# (mode 160000), and load_allowlist and check_scripts_from_main read from the submodule's
+# object store at that commit.
+
+# The commit MAIN_REF records for SELF_REPO_PATH when that is a gitlink, else nothing (the
+# script is committed to the project). Call after require_main_ref. Its output is captured,
+# so callers pass a die on with `|| exit`.
+main_gitlink() {
+    local entry
+    entry=$(git ls-tree "$MAIN_REF" "$SELF_REPO_PATH") || die 2 "cannot list $SELF_REPO_PATH on $MAIN_REF"
+    printf '%s\n' "$entry" | awk '$1 == "160000" && $2 == "commit" { print $3 }'
+}
+
+# git -C on the empty directory of a submodule that is not checked out would read the
+# project's repository instead, so the submodule must be the top of a work tree of its own.
+require_submodule_checkout() {
+    local prefix
+    if prefix=$(git -C "$SELF_REPO_PATH" rev-parse --show-prefix 2>/dev/null) && [ -z "$prefix" ]; then
+        return 0
+    fi
+    die 2 "submodule layout: $SELF_REPO_PATH is a submodule on $MAIN_REF but is not checked out here; run git submodule update --init $SELF_REPO_PATH"
+}
+
+# KEYS.md at commit $1 of the submodule states the signature threshold, on its one line
+# "Signatures required: N", for every project that records that commit; release.conf may
+# require more, never fewer. Call after submodule_fetch.
+check_keys_threshold() {
+    local gitlink=$1 sub=$SELF_REPO_PATH text required
+    text=$(git -C "$sub" show "$gitlink:KEYS.md" 2>/dev/null) ||
+        die 1 "submodule layout: $sub at $gitlink, the commit $MAIN_REF records, has no KEYS.md to read the signature threshold from"
+    required=$(printf '%s\n' "$text" | awk '
+        /^Signatures required: *[0-9]+\.?[ \t]*$/ { n++; v = $0; sub(/^Signatures required: */, "", v); sub(/\.?[ \t]*$/, "", v) }
+        END { if (n == 1) print v + 0 }')
+    [ -n "$required" ] ||
+        die 1 "submodule layout: KEYS.md in $sub at $gitlink, the commit $MAIN_REF records, must state the threshold on one line 'Signatures required: N'"
+    [ "$MIN_SIGNATURES" -ge "$required" ] ||
+        die 1 "submodule layout: MIN_SIGNATURES=$MIN_SIGNATURES in $CONF is below the $required signatures KEYS.md requires in $sub at $gitlink, the commit $MAIN_REF records; raise it to at least $required"
+}
+
+# Makes commit $1 of the submodule present in its object store. A checkout made before main
+# moved the pointer, or a shallow one (CI), lacks it: fetch it from the submodule's origin by
+# id, or the origin's branches where a server refuses an id it does not advertise. Retried
+# like git_fetch.
+submodule_fetch() {
+    local sha=$1 sub=$SELF_REPO_PATH attempt=1
+    if git -C "$sub" cat-file -e "$sha^{commit}" 2>/dev/null; then return 0; fi
+    git -C "$sub" remote get-url origin >/dev/null 2>&1 ||
+        die 2 "submodule layout: $sub lacks $sha, the commit $MAIN_REF records, and has no remote named origin to fetch it from"
+    info "submodule layout: fetching $sha, the commit $MAIN_REF records, into $sub from its origin"
+    until git -C "$sub" fetch --quiet --no-tags origin "$sha" 2>/dev/null ||
+        git -C "$sub" fetch --quiet --no-tags origin; do
+        [ "$attempt" -lt 3 ] || die 3 "git fetch in $sub from its origin failed after 3 attempts"
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    git -C "$sub" cat-file -e "$sha^{commit}" 2>/dev/null ||
+        die 1 "submodule layout: $MAIN_REF records $sha for $sub, but neither its checkout nor its origin has that commit"
+}
+
+# ---------------------------------------------------------------------------------------------
 # Hooks
 #
 # release.conf may define any of these; the defaults below do nothing, except hook_build.
@@ -463,10 +536,14 @@ primary_fprs() {
 }
 
 # Imports the maintainer keys from main (never from the tagged tree) into a private keyring.
+# In the submodule layout (MAIN_REF records SELF_REPO_PATH as a gitlink, and KEYS_PATH must lie
+# inside it) main holds no key files, so they are read from the submodule's object store at the
+# commit MAIN_REF records, never from its checkout: neither a tag nor a checkout can add a key.
+# The threshold KEYS.md states at that commit is checked there too (check_keys_threshold).
 # Sets ALLOW_GNUPGHOME and ALLOW_LIST ("handle<TAB>primary fingerprint", one line per primary
 # key; a file may hold several during a rotation). Thresholds count distinct handles.
 load_allowlist() {
-    local src where names name file fprs fpr handles
+    local src where names name file fprs fpr handles repo=. rev gitlink='' missing
     if [ -n "$ALLOW_GNUPGHOME" ]; then return 0; fi
     need gpg
     src=$WORK/allowlist
@@ -482,13 +559,31 @@ load_allowlist() {
         done
     else
         require_main_ref
-        where="$MAIN_REF:$ALLOWLIST_PATH"
-        names=$(git ls-tree --name-only "$where" 2>/dev/null) ||
-            die 1 "$ALLOWLIST_PATH does not exist on $MAIN_REF"
+        rev="$MAIN_REF:$ALLOWLIST_PATH"
+        where=$rev
+        missing="$ALLOWLIST_PATH does not exist on $MAIN_REF"
+        gitlink=$(main_gitlink) || exit
+        if [ -n "$gitlink" ]; then
+            # Keys outside the submodule would come from the project's own tree on main, and
+            # the allowlist of the commit main records would go unread.
+            case "$ALLOWLIST_PATH" in
+                "$SELF_REPO_PATH"/*) ;;
+                *) die 2 "submodule layout: KEYS_PATH must lie inside SELF_REPO_PATH: $MAIN_REF records $SELF_REPO_PATH as a submodule, but KEYS_PATH is $ALLOWLIST_PATH" ;;
+            esac
+            require_submodule_checkout
+            submodule_fetch "$gitlink"
+            check_keys_threshold "$gitlink"
+            repo=$SELF_REPO_PATH
+            rev="$gitlink:${ALLOWLIST_PATH#"$SELF_REPO_PATH"/}"
+            where="$SELF_REPO_PATH submodule $rev"
+            missing="$ALLOWLIST_PATH does not exist on $MAIN_REF (submodule layout: $SELF_REPO_PATH at $gitlink has no ${ALLOWLIST_PATH#"$SELF_REPO_PATH"/})"
+            info "submodule layout: maintainer keys from $SELF_REPO_PATH at $gitlink, the commit $MAIN_REF records"
+        fi
+        names=$(git -C "$repo" ls-tree --name-only "$rev" 2>/dev/null) || die 1 "$missing"
         while IFS= read -r name; do
             case "$name" in *.asc*) ;; *) continue ;; esac
             allowlist_name "$name" "$where"
-            git show "$where/$name" >"$src/$name" || die 1 "cannot read $where/$name"
+            git -C "$repo" show "$rev/$name" >"$src/$name" || die 1 "cannot read $where/$name"
         done <<EOF
 $names
 EOF
@@ -951,9 +1046,10 @@ check_tag() {
 
 # build and publish must run main's copy of this script, of release.conf (its values, such as
 # MIN_SIGNATURES, and its hooks) and of every EXTRA_SCRIPTS file, so an edited or stale
-# checkout cannot weaken them.
+# checkout cannot weaken them. In the submodule layout main's copy of this script is the one
+# in the submodule commit MAIN_REF records (check_script_in_submodule).
 check_scripts_from_main() {
-    local mine theirs file
+    local mine theirs file gitlink
     if [ "${RELEASE_ALLOW_LOCAL_SCRIPTS:-}" = 1 ]; then
         warn "RELEASE_ALLOW_LOCAL_SCRIPTS=1: not comparing $SELF_REPO_PATH, $CONF_REPO_PATH and EXTRA_SCRIPTS with $MAIN_REF"
         return 0
@@ -961,6 +1057,11 @@ check_scripts_from_main() {
     require_main_ref
     for file in "$SELF_REPO_PATH" "$CONF_REPO_PATH" $EXTRA_SCRIPTS; do
         if [ "$file" = "$SELF_REPO_PATH" ]; then
+            gitlink=$(main_gitlink) || exit
+            if [ -n "$gitlink" ]; then
+                check_script_in_submodule "$gitlink"
+                continue
+            fi
             mine=$(git hash-object -- "$SELF") || die 2 "cannot read $SELF"
         elif [ "$file" = "$CONF_REPO_PATH" ]; then
             mine=$(git hash-object -- "$CONF") || die 2 "cannot read $CONF"
@@ -972,6 +1073,21 @@ check_scripts_from_main() {
         [ "$mine" = "$theirs" ] ||
             die 2 "$file differs from $MAIN_REF; update the checkout or set RELEASE_ALLOW_LOCAL_SCRIPTS=1"
     done
+}
+
+# check_scripts_from_main for SELF_REPO_PATH in the submodule layout: the submodule is checked
+# out at GITLINK, the commit MAIN_REF records for it, and this script equals the file of its
+# name in that commit. The blob is hashed in the submodule, so its attributes apply.
+check_script_in_submodule() {
+    local gitlink=$1 sub=$SELF_REPO_PATH head mine theirs
+    require_submodule_checkout
+    head=$(git -C "$sub" rev-parse --verify --quiet 'HEAD^{commit}') || head=none
+    [ "$head" = "$gitlink" ] ||
+        die 2 "submodule layout: $sub is checked out at $head but $MAIN_REF records $gitlink; run git submodule update $sub, or set RELEASE_ALLOW_LOCAL_SCRIPTS=1"
+    mine=$(git -C "$sub" hash-object -- "$SELF") || die 2 "cannot read $SELF"
+    theirs=$(git -C "$sub" rev-parse --verify --quiet "$gitlink:${SELF##*/}") || theirs=missing
+    [ "$mine" = "$theirs" ] ||
+        die 2 "submodule layout: $SELF ($mine) differs from ${SELF##*/} in $sub at $gitlink ($theirs), the commit $MAIN_REF records; restore the checkout or set RELEASE_ALLOW_LOCAL_SCRIPTS=1"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1400,7 +1516,7 @@ section_body() {
 
 # Renders the release body for TAG at COMMIT to stdout.
 render_notes() {
-    local body handle fpr features_cell extra path name
+    local body handle fpr features_cell extra path name gitlink=''
     git show "$COMMIT:$CHANGELOG_FILE" >"$WORK/notes-changelog.md" 2>/dev/null ||
         die 1 "$CHANGELOG_FILE does not exist at $COMMIT"
     body=$(section_body <"$WORK/notes-changelog.md")
@@ -1425,6 +1541,14 @@ render_notes() {
     # The repository files SHA256SUMS lists depend only on COMMIT, so the commands below can
     # name them before the build has run.
     extra=$(sums_extra "$WORK/notes-extra") || exit
+    # In the submodule layout main holds the keys only as the gitlink, so the reader clones
+    # that one submodule too, at the commit main records, and finds KEYS.md beside the keys.
+    case "$KEYS_PATH" in
+        "$SELF_REPO_PATH"/*)
+            require_main_ref
+            gitlink=$(main_gitlink) || exit
+            ;;
+    esac
 
     # The verification block, with TAG, REPO and the file names filled in. The heredocs are
     # quoted, so $TAG, $2 and $NF reach the reader as written; only the @NAME@ placeholders
@@ -1439,8 +1563,16 @@ TAG=@TAG@
 REPO=@REPO@
 BASE="https://github.com/$REPO/releases/download/$TAG"
 if [ -n "$(ls -A)" ]; then echo "Run these commands in a new, empty directory" >&2; false; fi &&
+EOF
+    if [ -n "$gitlink" ]; then
+        sed -e "s|@SUB@|$SELF_REPO_PATH|g" <<'EOF'
+git clone --quiet --depth 1 --recurse-submodules=@SUB@ --shallow-submodules --branch main "https://github.com/$REPO.git" main &&
+EOF
+    else
+        cat <<'EOF'
 git clone --quiet --depth 1 --branch main "https://github.com/$REPO.git" main &&
 EOF
+    fi
     if [ -n "$extra" ]; then
         cat <<'EOF'
 git -C main fetch --quiet --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" &&
@@ -1469,7 +1601,17 @@ echo "Signature and hashes verified"
 
 If the last line `Signature and hashes verified` is missing, the files are not verified; stop, do not extract or run anything from this release, and report it.
 
+EOF
+    if [ -n "$gitlink" ]; then
+        sed -e "s|@SUB@|$SELF_REPO_PATH|g" <<'EOF'
+Then check the key fingerprints: every primary key fingerprint `gpg --show-keys` printed, including the one after `signed by primary key`, must appear in the table below, in the key table of `main/@SUB@/KEYS.md` with the Status `active`, and in `https://github.com/<handle>.gpg`, where `<handle>` is the key file's name without `.asc`. Stop on any mismatch.
+EOF
+    else
+        cat <<'EOF'
 Then check the key fingerprints: every primary key fingerprint `gpg --show-keys` printed, including the one after `signed by primary key`, must appear in the table below and in `https://github.com/<handle>.gpg`, where `<handle>` is the key file's name without `.asc`. Stop on any mismatch.
+EOF
+    fi
+    cat <<'EOF'
 
 Maintainer release keys on `main` when these notes were written:
 
@@ -1507,9 +1649,15 @@ EOF
 - `sha256sum` prints `FAILED open or read` for a file from the repository: `git archive` did not extract it. Check that the tag was fetched; if it was, report it.
 EOF
     fi
-    cat <<'EOF'
+    if [ -n "$gitlink" ]; then
+        sed -e "s|@SUB@|$SELF_REPO_PATH|g" <<'EOF'
+- A fingerprint is missing from the table above, from `main/@SUB@/KEYS.md` or from GitHub, differs, or its Status in `KEYS.md` is not `active`, such as `revoked YYYY-MM-DD`. Report it.
+EOF
+    else
+        cat <<'EOF'
 - A fingerprint is missing from the table above or from GitHub, or differs. Report it.
 EOF
+    fi
     hook_notes_sections verify
     sed -e "s|@REPO@|$REPO|g" <<'EOF'
 
