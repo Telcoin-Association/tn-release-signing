@@ -22,7 +22,8 @@ Their history before that date lives in the telcoin-network repository.
 
 A consumer adds this repository as a submodule at `release/` and runs `release/release.sh <subcommand> <TAG>` from its own root.
 It keeps its own values and release steps in a `release.conf` in its repository root, the parent of the directory that holds `release.sh`, with `KEYS_PATH=release/keys` and `SELF_REPO_PATH=release`.
-`examples/release.conf` lists every key, with the values telcoin-network used when the script was imported and its release steps sketched as hooks.
+`examples/cargo.release.conf` is the `release.conf` to start from in this layout: a plain cargo package with this repository at `release/`, the values of tn-p2p-allow-sync and a sketch of a reproducible `hook_build`.
+`examples/release.conf` lists every key at more length, with the values telcoin-network used when the script was imported, for its committed `etc/release.sh`, and its release steps sketched as hooks.
 `release.sh` reads the keys and itself at the commit of this repository that the consumer's `main` records for `release/`, so a change here reaches a consumer only when its `main` moves that pointer, and every consumer needs a CODEOWNERS rule that puts each move in front of a maintainer.
 A maintainer runs `yubikey-setup.sh` from a checkout of this repository, a clone or a consumer's `release/` submodule, and opens the pull request that adds the key here.
 [Signing a release](docs/signing.md) covers the steps, the operator's verify recipe, moving the pointer and rotating keys, and [YubiKey signing setup](docs/yubikey-setup.md) covers creating a key.

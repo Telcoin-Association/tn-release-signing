@@ -2,9 +2,9 @@
 # Dry-run smoke test of the whole pipeline (plan 9.3): every step runs with RELEASE_DRY_RUN=1,
 # and RELEASE_DIR stands in for the GitHub release. Two fixtures of mkfixture.sh:
 #   1. a cargo package that carries this repository as a submodule at release/, whose
-#      release.conf is fx_conf's plus two fixture hooks (hook_build packs a two-line script
-#      as the program, hook_changelog writes a one-entry section), runs prep, tag, check-tag,
-#      notes, draft, build, sign, verify and publish for v1.3.0;
+#      release.conf is examples/cargo.release.conf plus two fixture hooks (hook_build packs a
+#      two-line script as the program, hook_changelog writes a one-entry section), runs prep,
+#      tag, check-tag, notes, draft, build, sign, verify and publish for v1.3.0;
 #   2. a project that commits release.sh at etc/, with examples/release.conf verbatim (the
 #      node's values, every hook left empty), passes check-tag and verify for v1.2.3. Its
 #      build alone runs with a stub hook_build appended, since the default one needs docker.
@@ -58,8 +58,7 @@ EOF
 # ---------------------------------------------------------------------------------------------
 # Fixture 1: a plain cargo package with the submodule layout, through every step.
 
-fx_conf "$T_DIR/base.conf"
-cat "$T_DIR/base.conf" "$T_DIR/hook-build.conf" - >"$T_DIR/cargo.conf" <<'EOF'
+cat "$FX_SRC/examples/cargo.release.conf" "$T_DIR/hook-build.conf" - >"$T_DIR/cargo.conf" <<'EOF'
 
 # Fixture: prep's CHANGELOG section.
 hook_changelog() {
@@ -70,8 +69,11 @@ mkfixture "$T_DIR/cargo" "$T_DIR/cargo.conf"
 clone=$FX/clone
 rd=$T_DIR/cargo-release
 fpr=$(fx_fpr alice)
-tarball=fixture-v1.3.0-x86_64-unknown-linux-musl.tar.gz
+tarball=tn-p2p-allow-sync-v1.3.0-x86_64-unknown-linux-musl.tar.gz
 main0=$(git -C "$clone" rev-parse HEAD)
+
+step "$clone" ./release/release.sh parse v1.3.0-adiri
+expect_rc 2 "parse refuses a channel suffix, which TAG_RE does not allow"
 
 step "$clone" rel ./release/release.sh prep v1.3.0
 expect_rc 0 "prep writes v1.3.0 on main's tip"
@@ -101,7 +103,7 @@ step "$clone" rel ./release/release.sh notes v1.3.0
 expect_rc 0 "notes renders the release body"
 expect_out "- the dry-run release" "the body carries the CHANGELOG entry"
 expect_out "| Tarball | \`$tarball\` (\`x86_64-unknown-linux-musl\`) |" "the body names the tarball"
-expect_out "REPO=example/fixture" "the verify commands name DEFAULT_REPO"
+expect_out "REPO=Telcoin-Association/tn-p2p-allow-sync" "the verify commands name DEFAULT_REPO"
 expect_out "| @alice | \`$fpr\` |" "the body lists alice's fingerprint"
 expect_out 'git clone --quiet --depth 1 --recurse-submodules=release --shallow-submodules --branch main "https://github.com/$REPO.git" main &&' \
     "the verify commands clone main with the release submodule, which holds the keys"
@@ -120,7 +122,7 @@ sums=$(awk '/^SHA256SUMS sha256: / { print $3 }' "$T_OUT") || sums=
 check "SHA256SUMS lists the tarball alone" test "$(awk '{ print $2 }' "$rd/SHA256SUMS")" = "$tarball"
 listing=$(tar -tzf "$rd/$tarball" 2>/dev/null | LC_ALL=C sort) || listing=
 d=${tarball%.tar.gz}
-want=$(printf '%s\n' "$d/" "$d/fixture" "$d/LICENSE" | LC_ALL=C sort)
+want=$(printf '%s\n' "$d/" "$d/tn-p2p-allow-sync" "$d/LICENSE-APACHE" "$d/LICENSE-MIT" "$d/NOTICE" | LC_ALL=C sort)
 check "the tarball holds the program and the TARBALL_FILES from the tag" test "$listing" = "$want"
 
 step "$clone" rel RELEASE_DIR="$rd" RELEASE_YES=1 RELEASE_SUMS_SHA256="$sums" RELEASE_GPG_KEY="$fpr" \

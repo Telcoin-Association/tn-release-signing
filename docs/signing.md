@@ -13,10 +13,10 @@ The consumer adds this repository as a submodule at `release/` and writes a `rel
 
 ```sh
 git submodule add <URL of this repository> release
-cp release/examples/release.conf release.conf
+cp release/examples/cargo.release.conf release.conf
 ```
 
-In that `release.conf`, `KEYS_PATH=release/keys` and `SELF_REPO_PATH=release`; the other values are the consumer's own.
+[`examples/cargo.release.conf`](../examples/cargo.release.conf) is written for this layout, a plain cargo package with the submodule at `release/`; in the copy, `KEYS_PATH=release/keys` and `SELF_REPO_PATH=release` stay, and the other values become the consumer's own.
 The submodule sits one directory below the root, as `release/` does, and nowhere deeper: `release.sh` reads `release.conf` from the parent of its own directory, while `build` and `publish` compare `release.conf` and `SELF_REPO_PATH` with `main`'s copies from the root, so every step refuses (exit 2) a `SELF_REPO_PATH` that does not name the directory holding `release.sh`.
 Every step then runs from the consumer's root as `release/release.sh <step> <TAG>`, and a consumer may wrap the steps in make targets of its own.
 
@@ -33,7 +33,7 @@ The keys come from the submodule's object store at the commit `main` records, ne
 ## release.conf
 
 `release.sh` sources `release.conf` before anything else, so it is bash 3.2: no associative arrays, `mapfile`, `${x,,}`, `sed -i` or GNU `date`.
-[`examples/release.conf`](../examples/release.conf) describes every key; a missing required key or a malformed value stops every step with exit 2.
+[`examples/cargo.release.conf`](../examples/cargo.release.conf) sets every required key for the submodule layout, and [`examples/release.conf`](../examples/release.conf), telcoin-network's values for its committed `etc/release.sh`, describes every key at more length; a missing required key or a malformed value stops every step with exit 2.
 
 | Key | Required | What it sets |
 | --- | --- | --- |
