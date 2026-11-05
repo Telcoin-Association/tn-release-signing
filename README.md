@@ -15,7 +15,7 @@ Their history before that date lives in the telcoin-network repository.
 | `yubikey-setup.sh` | One-time setup of a maintainer's signing key on a YubiKey; macOS only. |
 | `keys/` | The allowlist, one `<handle>.asc` per maintainer, with its format and rules in `keys/README.md`. |
 | `KEYS.md` | The table of maintainer keys, the signature threshold and the co-signer policy. |
-| `docs/` | The maintainer guides to the YubiKey setup, signing and key rotation. |
+| `docs/` | The maintainer guides: [YubiKey signing setup](docs/yubikey-setup.md), and [Signing a release](docs/signing.md) with key rotation. |
 | `examples/` | The `release.conf` files a consumer starts from. |
 
 ## How a consumer uses this repository
@@ -25,3 +25,4 @@ It keeps its own values and release steps in a `release.conf` in its repository 
 `examples/release.conf` lists every key, with the values telcoin-network used when the script was imported and its release steps sketched as hooks.
 `release.sh` reads the keys and itself at the commit of this repository that the consumer's `main` records for `release/`, so a change here reaches a consumer only when its `main` moves that pointer, and every consumer needs a CODEOWNERS rule that puts each move in front of a maintainer.
 A maintainer runs `yubikey-setup.sh` from a checkout of this repository, a clone or a consumer's `release/` submodule, and opens the pull request that adds the key here.
+[Signing a release](docs/signing.md) covers the steps, the operator's verify recipe, moving the pointer and rotating keys, and [YubiKey signing setup](docs/yubikey-setup.md) covers creating a key.
