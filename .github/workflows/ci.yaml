@@ -1,0 +1,119 @@
+name: CI
+
+# release.sh runs in CI, on the build server and on the maintainers' Macs, whose /bin/bash is
+# 3.2, and every signed project runs this one copy, so these checks guard all of them.
+#
+# Every action is pinned to a full commit SHA and every image to a digest, with the tag in a
+# comment; .github/ACTIONS.md lists the pins and how to update them. The workflow token gets
+# no permissions by default; each job asks for read access to the contents only.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+env:
+  # bash 3.2.57 on Alpine 3.22: the bash of macOS, with busybox tools.
+  BASH32_IMAGE: bash:3.2@sha256:b6252c62fc86114f93f02104a486c71e6569371d95950ea7479a2ffd6b47f16a
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04 # shellcheck is preinstalled on ubuntu runners
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Errors only. -x follows the tests' source directives. A project's release.conf starts
+      # as a copy of an example conf and release.sh sources it, so those are checked too.
+      - name: shellcheck -x --severity=error
+        run: |
+          shellcheck --version
+          git ls-files -z '*.sh' 'examples/*.conf' | xargs -0 shellcheck -x --severity=error
+
+  bash32:
+    name: bash 3.2 syntax and constructs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: bash -n under bash 3.2
+        run: |
+          # shellcheck disable=SC2016 # the bash in the container expands "$@"
+          git ls-files -z '*.sh' 'examples/*.conf' |
+            xargs -0 docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w "$BASH32_IMAGE" \
+              bash -c 'bash --version | head -n 1; for f in "$@"; do bash -n "$f" || exit 1; echo "ok $f"; done' bash
+      # bash -n accepts what fails only when the line runs under 3.2 (declare -A, mapfile,
+      # ${x,,}) and the GNU-only flags macOS lacks, so those are found by pattern. Comment
+      # lines are skipped, as the scripts name these constructs to forbid them.
+      - name: No bash 4 constructs or GNU-only flags
+        run: |
+          pattern='declare -A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*(,,?|\^\^?)\}|sed -i|date (-d|--date)|readlink -f'
+          if git ls-files -z '*.sh' 'examples/*.conf' | xargs -0 grep -n -E -e "$pattern" |
+            grep -v -E '^[^:]+:[0-9]+:[[:space:]]*#'; then
+            echo "::error::the lines above use bash 4 constructs or GNU-only flags, which macOS's bash 3.2 cannot run"
+            exit 1
+          fi
+          echo "no bash 4 constructs or GNU-only flags outside comments"
+
+  dry-run:
+    name: dry-run tests (bash ${{ matrix.bash }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        bash: ['5', '3.2']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install git and GnuPG
+        if: matrix.bash == '5'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends git gnupg gpg-agent
+      # Every test runs every step with RELEASE_DRY_RUN=1 on fixture repositories with a
+      # throwaway key, so nothing reaches GitHub or a remote.
+      - name: Tests under the runner's bash
+        if: matrix.bash == '5'
+        run: |
+          bash --version | head -n 1
+          git --version
+          gpg --version | head -n 1
+          rc=0
+          for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh; do
+            bash "$t" || rc=1
+          done
+          exit "$rc"
+      # The build step packs with GNU tar, which the build server has. sha256sum is removed so
+      # release.sh checks hashes with shasum, as it does on a Mac.
+      - name: Tests under bash 3.2
+        if: matrix.bash == '3.2'
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w "$BASH32_IMAGE" sh -c '
+            set -e
+            apk add --no-cache -q git gnupg gpg-agent tar perl-utils
+            rm /usr/bin/sha256sum
+            bash --version | head -n 1
+            git --version
+            gpg --version | head -n 1
+            rc=0
+            for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh; do
+              bash "$t" || rc=1
+            done
+            exit "$rc"'

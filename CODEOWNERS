@@ -1,0 +1,7 @@
+# The maintainer keys and the policy table decide who can sign a release of every project
+# that carries this repository, so a change to either needs a code owner's review (with
+# "Require review from Code Owners" on main).
+# grantkee is the only maintainer today; each new maintainer is added to both lines once
+# their key is on main.
+/keys/ @grantkee
+/KEYS.md @grantkee

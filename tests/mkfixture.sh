@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fixture of the submodule layout: a project that carries this repository as a submodule.
 #
-#   tests/mkfixture.sh DIR
+#   tests/mkfixture.sh DIR [CONF]
 #
 # builds, in DIR (new or empty):
 #   gnupg/          GNUPGHOME with the throwaway maintainer key alice (ed25519, no passphrase)
@@ -11,14 +11,19 @@
 #   signing-work/   the signing repository: release.sh, README.md and examples/ of this
 #                   checkout, keys/alice.asc and a KEYS.md that requires one signature
 #   signing.git     its bare copy, the submodule's origin
-#   consumer-work/  a cargo package with signing.git as a submodule at release/, a
-#                   release.conf with KEYS_PATH=release/keys and SELF_REPO_PATH=release, and on
-#                   main a base commit and the release commit of v1.2.3
+#   consumer-work/  a cargo package with signing.git as a submodule at release/, CONF as its
+#                   release.conf (default: fx_conf's, with KEYS_PATH=release/keys and
+#                   SELF_REPO_PATH=release), a one-line file for every TARBALL_FILES name
+#                   after the first, and on main a base commit and the release commit of v1.2.3
 #   consumer.git    its bare copy, the clone's origin
 #   clone/          git clone --recurse-submodules of consumer.git, at main
 #
-# A test sources this file instead and calls mkfixture DIR, then the fx_* functions to change
-# the fixture further; FX names DIR. The bare repositories are updated with fetch, never push.
+# mkfixture_committed DIR CONF builds the committed layout instead: no signing repository, and
+# consumer-work commits release.sh at CONF's SELF_REPO_PATH and alice.asc in CONF's KEYS_PATH.
+#
+# A test sources this file instead and calls mkfixture DIR [CONF] (or mkfixture_committed),
+# then the fx_* functions to change the fixture further; FX names DIR. The bare repositories
+# are updated with fetch, never push.
 # Bash 3.2 safe; the caller runs it with set -e, as the functions do not check every command.
 # Every git command runs with -C, so the caller's directory is never read (in a container it
 # may be a mounted worktree whose .git file names a path that does not exist there).
@@ -141,6 +146,46 @@ fx_tag() {
     git -C "$FX/clone" -c gpg.format=openpgp tag -s -u "$(fx_fpr "$1")" -m "Release $2" "$2" "$3"
 }
 
+# fx_conf_value CONF NAME: the value CONF sets for NAME. CONF is sourced in a subshell, so its
+# assignments and hook functions stay there.
+fx_conf_value() {
+    (
+        # shellcheck source=/dev/null
+        . "$1" >/dev/null 2>&1
+        printf '%s\n' "${!2:-}"
+    )
+}
+
+# fx_tree CONF: the files of consumer-work that both layouts share, not yet committed: CONF as
+# release.conf (fx_conf's when CONF is empty), a one-line file for every TARBALL_FILES name
+# after the first (the program comes from the build), CHANGELOG.md with the anchor and a
+# .gitignore for the artifacts. The caller writes Cargo.toml.
+fx_tree() {
+    local w=$FX/consumer-work name first=1
+    if [ -n "$1" ]; then cp "$1" "$w/release.conf"; else fx_conf "$w/release.conf"; fi
+    for name in $(fx_conf_value "$w/release.conf" TARBALL_FILES); do
+        if [ "$first" = 1 ]; then
+            first=0
+            continue
+        fi
+        printf 'fixture %s\n' "$name" >"$w/$name"
+    done
+    printf '# Changelog\n\n<!-- ANCHOR: releases -->\n' >"$w/CHANGELOG.md"
+    printf 'target/\n' >"$w/.gitignore"
+}
+
+# fx_first_release: commits the tree of consumer-work as the base commit on main and the
+# release commit of v1.2.3 on top, copies main to consumer.git and clones that into clone/.
+fx_first_release() {
+    local w=$FX/consumer-work
+    git -C "$w" add -A
+    git -C "$w" commit -q -m base
+    fx_release 1.2.3
+    git -C "$FX" init -q --bare "$FX/consumer.git"
+    fx_publish main
+    fx_git -C "$FX" clone -q --recurse-submodules "$FX/consumer.git" "$FX/clone"
+}
+
 mkfixture() {
     local f w
     fx_init "$1"
@@ -162,24 +207,40 @@ mkfixture() {
     w=$FX/consumer-work
     git -C "$FX" init -q "$w"
     fx_git -C "$w" submodule add -q "$FX/signing.git" release
-    fx_conf "$w/release.conf"
+    fx_tree "${2:-}"
     printf '[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n' >"$w/Cargo.toml"
-    printf '# Changelog\n\n<!-- ANCHOR: releases -->\n' >"$w/CHANGELOG.md"
-    printf 'fixture license\n' >"$w/LICENSE"
-    printf 'target/\n' >"$w/.gitignore"
-    git -C "$w" add -A
-    git -C "$w" commit -q -m base
-    fx_release 1.2.3
-    git -C "$FX" init -q --bare "$FX/consumer.git"
-    fx_publish main
+    fx_first_release
+}
 
-    fx_git -C "$FX" clone -q --recurse-submodules "$FX/consumer.git" "$FX/clone"
+# mkfixture_committed DIR CONF: the layout of a project that commits release.sh (telcoin-network
+# today): consumer-work holds this checkout's release.sh at CONF's SELF_REPO_PATH, alice.asc in
+# CONF's KEYS_PATH, the files of fx_tree and a workspace Cargo.toml ([workspace.package]
+# version), with the commits, consumer.git and clone/ of mkfixture.
+mkfixture_committed() {
+    local w self keys
+    fx_init "$1"
+    fx_key alice
+    self=$(fx_conf_value "$2" SELF_REPO_PATH)
+    keys=$(fx_conf_value "$2" KEYS_PATH)
+    if [ -z "$self" ] || [ -z "$keys" ]; then
+        printf 'mkfixture: %s sets no SELF_REPO_PATH or KEYS_PATH\n' "$2" >&2
+        return 1
+    fi
+    w=$FX/consumer-work
+    git -C "$FX" init -q "$w"
+    mkdir -p "$w/$keys"
+    case "$self" in */*) mkdir -p "$w/${self%/*}" ;; esac
+    cp "$FX_SRC/release.sh" "$w/$self"
+    cp "$FX/alice.asc" "$w/$keys/alice.asc"
+    fx_tree "$2"
+    printf '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "0.0.0"\n' >"$w/Cargo.toml"
+    fx_first_release
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     set -euo pipefail
-    [ $# = 1 ] || { printf 'usage: %s DIR\n' "$0" >&2; exit 2; }
-    mkfixture "$1"
+    [ $# = 1 ] || [ $# = 2 ] || { printf 'usage: %s DIR [CONF]\n' "$0" >&2; exit 2; }
+    mkfixture "$1" "${2:-}"
     gpgconf --homedir "$GNUPGHOME" --kill all >/dev/null 2>&1 || true
     printf 'fixture in %s\n' "$FX"
 fi
