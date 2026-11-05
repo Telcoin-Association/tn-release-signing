@@ -52,6 +52,27 @@ fx_init() {
     git -C "$FX" config --global advice.detachedHead false
 }
 
+# fx_conf FILE: the consumer's release.conf.
+fx_conf() {
+    cat >"$1" <<'EOF'
+# shellcheck shell=bash disable=SC2034 # release.sh reads these values after sourcing the file
+# The fixture consumer: a cargo package that carries tn-release-signing at release/.
+PROJECT=fixture
+DEFAULT_REPO=example/fixture
+TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc[1-9][0-9]*)?$'
+TRIPLE=x86_64-unknown-linux-musl
+TARBALL_FILES='fixture LICENSE'
+VERSION_FILE=Cargo.toml
+CHANGELOG_FILE=CHANGELOG.md
+ANCHOR='<!-- ANCHOR: releases -->'
+MAIN_REF=refs/remotes/origin/main
+ARTIFACT_ROOT=target/release-artifacts
+MIN_SIGNATURES=1
+KEYS_PATH=release/keys
+SELF_REPO_PATH=release
+EOF
+}
+
 # fx_key HANDLE: a throwaway maintainer key; writes FX/HANDLE.asc and FX/fpr-HANDLE.
 fx_key() {
     local fpr
@@ -141,23 +162,7 @@ mkfixture() {
     w=$FX/consumer-work
     git -C "$FX" init -q "$w"
     fx_git -C "$w" submodule add -q "$FX/signing.git" release
-    cat >"$w/release.conf" <<'EOF'
-# shellcheck shell=bash disable=SC2034 # release.sh reads these values after sourcing the file
-# The fixture consumer: a cargo package that carries tn-release-signing at release/.
-PROJECT=fixture
-DEFAULT_REPO=example/fixture
-TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc[1-9][0-9]*)?$'
-TRIPLE=x86_64-unknown-linux-musl
-TARBALL_FILES='fixture LICENSE'
-VERSION_FILE=Cargo.toml
-CHANGELOG_FILE=CHANGELOG.md
-ANCHOR='<!-- ANCHOR: releases -->'
-MAIN_REF=refs/remotes/origin/main
-ARTIFACT_ROOT=target/release-artifacts
-MIN_SIGNATURES=1
-KEYS_PATH=release/keys
-SELF_REPO_PATH=release
-EOF
+    fx_conf "$w/release.conf"
     printf '[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n' >"$w/Cargo.toml"
     printf '# Changelog\n\n<!-- ANCHOR: releases -->\n' >"$w/CHANGELOG.md"
     printf 'fixture license\n' >"$w/LICENSE"

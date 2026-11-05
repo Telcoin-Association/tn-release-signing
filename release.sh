@@ -61,7 +61,7 @@
 #
 # Environment (all optional):
 #   RELEASE_REPO                   owner/repo; default DEFAULT_REPO, GITHUB_REPOSITORY in CI
-#   RELEASE_COMMIT                 tag: commit to tag instead of the origin/main tip
+#   RELEASE_COMMIT                 tag: commit to tag instead of the MAIN_REF tip
 #   RELEASE_GPG_KEY                tag, sign: signing key; default `git config user.signingkey`
 #   RELEASE_SIG_THRESHOLD          maintainer signatures required; never below MIN_SIGNATURES
 #   RELEASE_ALLOW_LOCAL_SCRIPTS=1  build, publish: allow this script, release.conf or an
@@ -122,6 +122,7 @@ ANCHOR='' MAIN_REF='' ARTIFACT_ROOT='' MIN_SIGNATURES='' KEYS_PATH='' SELF_REPO_
 EXTRA_ASSETS='' EXTRA_SCRIPTS='' BUILD_IMAGE=''
 ALLOWLIST_PATH=  # load_conf: KEYS_PATH, the allowlist directory load_allowlist reads on main
 CONF=            # load_conf: absolute path of the release.conf it sourced
+MAIN_FETCH=      # load_conf: the refspec that fetches MAIN_REF's branch from origin
 
 # State. parse_tag sets TAG VERSION CHANNEL CHANNEL_SUFFIX RC BASE FEATURES PRERELEASE ALIAS
 # TARBALL, then hook_parse_extras may change CHANNEL FEATURES PRERELEASE ALIAS EXTRA_ASSETS;
@@ -313,6 +314,12 @@ load_conf() {
     for _conf_key in KEYS_PATH SELF_REPO_PATH VERSION_FILE CHANGELOG_FILE ARTIFACT_ROOT MAIN_REF; do
         repo_path_ok "${!_conf_key}" || die 2 "$CONF: $_conf_key must be a relative path without '..', got '${!_conf_key}'"
     done
+    # fetch_tag, prep and tag update MAIN_REF by fetching its branch, so it must be the ref a
+    # fetch of origin's branch writes.
+    case "$MAIN_REF" in
+        refs/remotes/origin/?*) MAIN_FETCH="+refs/heads/${MAIN_REF#refs/remotes/origin/}:$MAIN_REF" ;;
+        *) die 2 "$CONF: MAIN_REF must be refs/remotes/origin/<branch>, got '$MAIN_REF'" ;;
+    esac
     # Checked as a whole first, so the unquoted loops below can neither glob nor split oddly.
     [[ "$TARBALL_FILES" =~ $LIST_RE ]] || die 2 "$CONF: TARBALL_FILES must be file names separated by spaces"
     for _conf_name in $TARBALL_FILES; do
@@ -813,9 +820,9 @@ ls_remote_tag() {
     printf '%s\n' "$out" | awk -v r="refs/tags/$1" '$2 == r { print $1 }'
 }
 
-# check-tag step (1), outside CI and dry run: fetch main, this tag and every other v* tag,
-# unforced, so a local tag that differs from origin is an error rather than silently replaced,
-# and the version rules see the tags origin has.
+# check-tag step (1), outside CI and dry run: fetch main (MAIN_FETCH), this tag and every
+# other v* tag, unforced, so a local tag that differs from origin is an error rather than
+# silently replaced, and the version rules see the tags origin has.
 fetch_tag() {
     local remote local_obj
     if [ "$FETCHED" = 1 ] || [ "$DRY_RUN" = 1 ] || [ "${GITHUB_ACTIONS:-}" = true ]; then return 0; fi
@@ -824,7 +831,7 @@ fetch_tag() {
     if local_obj=$(git rev-parse --verify --quiet "refs/tags/$TAG"); then
         [ "$local_obj" = "$remote" ] || die 1 "local tag $TAG ($local_obj) differs from origin ($remote)"
     fi
-    git_fetch +refs/heads/main:refs/remotes/origin/main "refs/tags/$TAG:refs/tags/$TAG" 'refs/tags/v*:refs/tags/v*'
+    git_fetch "$MAIN_FETCH" "refs/tags/$TAG:refs/tags/$TAG" 'refs/tags/v*:refs/tags/v*'
     FETCHED=1
 }
 
@@ -1825,7 +1832,7 @@ cmd_prep() {
     local main_sha remote anchors changed name
     need cargo
     [ -z "$(git status --porcelain --untracked-files=no)" ] || die 2 "tracked files have local changes; prep needs a clean checkout of main"
-    if [ "$DRY_RUN" != 1 ]; then git_fetch +refs/heads/main:refs/remotes/origin/main; fi
+    if [ "$DRY_RUN" != 1 ]; then git_fetch "$MAIN_FETCH"; fi
     require_main_ref
     main_sha=$(git rev-parse "$MAIN_REF^{commit}")
     [ "$(git rev-parse HEAD)" = "$main_sha" ] || die 2 "HEAD is not the tip of main ($MAIN_REF = $main_sha)"
@@ -1893,7 +1900,7 @@ EOF
 cmd_tag() {
     local target remote rc
     need gpg
-    if [ "$DRY_RUN" != 1 ]; then git_fetch +refs/heads/main:refs/remotes/origin/main; fi
+    if [ "$DRY_RUN" != 1 ]; then git_fetch "$MAIN_FETCH"; fi
     require_main_ref
     if [ -n "${RELEASE_COMMIT:-}" ]; then
         target=$(git rev-parse --verify --quiet "$RELEASE_COMMIT^{commit}") ||
