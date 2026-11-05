@@ -4,7 +4,8 @@ This repository holds the release script, the YubiKey provisioning script and th
 Each project consumes it as a git submodule, so one allowlist and one signing procedure cover every release.
 
 `release.sh` was imported from telcoin-network `etc/release.sh` at commit `a0d6e6e26` (2222 lines) on 2026-11-05.
-Its history before that date lives in the telcoin-network repository.
+`yubikey-setup.sh` was imported from `etc/yubikey-setup.sh` at the same commit, with its paths moved to this repository's layout.
+Their history before that date lives in the telcoin-network repository.
 
 ## Layout
 
