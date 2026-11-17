@@ -17,9 +17,9 @@
 #   3. pins       change the PIN and Admin PIN (ykman prompts for them)
 #   4. identity   GitHub login (gh, else git config github.user, else a prompt), name and
 #                 email for the user ID
-#   5. key        generated on the YubiKey: gpg --card-edit admin, key-attr (ECC, Curve 25519
-#                 for all three keys), generate (no off-card backup, 2 years); revocation
-#                 certificate kept; touch policy on
+#   5. key        generated on the YubiKey: gpg --card-edit, given admin, key-attr (ECC, Curve
+#                 25519 for all three keys) and generate (no off-card backup, 2 years) on its
+#                 command fd; revocation certificate kept; touch policy on
 #   6. export     ~/<handle>.asc
 #   7. allowlist  keys/<handle>.asc and the KEYS.md row on the current branch, staged but not
 #                 committed
@@ -52,9 +52,10 @@
 #   - The private key is generated inside the YubiKey and never leaves it: the script never
 #     calls --export-secret-keys, keytocard or gpg's off-card backup (it answers no to "Make
 #     off-card backup of encryption key?").
-#   - gpg's card editor is driven by answering each question on its status fd by keyword. An
-#     unexpected question, including any GET_HIDDEN, stops gpg while it waits for the answer,
-#     so no question is ever left to gpg's default.
+#   - gpg's card editor is driven by answering each question on its status fd by keyword, and
+#     its commands are answers to its prompt, never arguments. An unexpected question,
+#     including any GET_HIDDEN and the prompt once the commands are used up, stops gpg while it
+#     waits for the answer, so no question is ever left to gpg's default.
 #   - Every mutating step is read back from the card, the keyring, the file or the API.
 #   - Every ykman call carries --device SERIAL; gpg calls that may prompt carry
 #     --pinentry-mode ask.
@@ -113,7 +114,7 @@ NAME_RE='^[^<>():0-9][^<>():]{4,}$'
 
 # State. The functions named in the comments own each variable.
 MODE=             # main: check or run
-WORK=             # setup: private temp dir, removed on exit
+WORK=             # setup: private temp dir, removed on exit unless KEEP_WORK is 1
 HOME_GNUPG=$HOME/.gnupg
 BREW_BIN=         # stage_tools
 GPG=              # stage_tools: brew's gpg, gpgconf, ykman and pinentry-mac
@@ -140,6 +141,7 @@ TOKEN_TYPE=       # stage_github: oauth, fine-grained-pat, classic-pat, unknown,
 STAGED=           # stage_allowlist: files handed to git add
 EDITOR_PID=       # drive_gpg_editor: the gpg it runs in the background, for cleanup
 EDITOR_KEYWORD=   # drive_gpg_editor: the question it did not answer
+KEEP_WORK=0       # card_editor_failed: 1 keeps WORK, which holds gpg's output, after exit
 GENERATED=0       # generate_key: the key was generated in this run
 
 # ---------------------------------------------------------------------------------------------
@@ -948,14 +950,19 @@ other_keys() {
     "$GPG" --show-keys --with-colons "$1" 2>/dev/null | list_fprs pub | awk -v f="$FPR" '$0 != f' | tr '\n' ' ' | sed 's/ $//' || true
 }
 
-# drive_gpg_editor TABLE PREFIX ARG...: runs "$GPG" --no-tty --command-fd 4 --status-fd 5 ARG...
-# in the background and answers each question gpg asks on its status fd (GET_LINE or GET_BOOL
-# KEYWORD) with the output of "TABLE KEYWORD". gpg is stopped with SIGTERM while it waits for
-# the answer when TABLE has no answer (it returns non-zero), when the question is a GET_HIDDEN,
-# and when a keyword comes twice in a row (gpg rejected the answer). Closing the command fd
-# would not cancel: gpg reads EOF as an empty answer, which takes the default, and the default
-# of the off-card backup question is yes. Status lines go to PREFIX.status, gpg's own output to
-# PREFIX.out.
+# drive_gpg_editor TABLE PREFIX COMMAND...: runs "$GPG" --no-tty --command-fd 4 --status-fd 5
+# --no-options --homedir "$HOME_GNUPG" --pinentry-mode ask --card-edit in the background and
+# gives it the COMMANDs one by one, as the answers to its prompt (GET_LINE cardedit.prompt).
+# The commands go on the command fd because gpg drops the first argument after --card-edit
+# (g10/gpg.c, case aCardEdit): an admin given there never ran, so gpg refused key-attr and
+# generate as admin-only commands, in a message that --no-tty discards, and exited 0. Every
+# other question gpg asks on its status fd (GET_LINE or GET_BOOL KEYWORD) is answered with the
+# output of "TABLE KEYWORD". gpg is stopped with SIGTERM while it waits for the answer when
+# TABLE has no answer (it returns non-zero), when the question is a GET_HIDDEN, when a keyword
+# other than the prompt comes twice in a row (gpg rejected the answer), and when the prompt
+# comes after the last COMMAND. Closing the command fd would not cancel: gpg reads EOF as an
+# empty answer, which takes the default, and the default of the off-card backup question is
+# yes. Status lines go to PREFIX.status, gpg's own output to PREFIX.out.
 # Returns 0 when gpg exits 0, 3 when it was stopped (EDITOR_KEYWORD names the question), and
 # gpg's exit status otherwise. EDITOR_PID holds gpg's pid while it runs, for cleanup.
 drive_gpg_editor() {
@@ -965,7 +972,8 @@ drive_gpg_editor() {
     rm -f "$WORK/cmd" "$WORK/status"
     mkfifo -m 600 "$WORK/cmd" "$WORK/status" || die 1 "mkfifo failed in $WORK"
     : >"$prefix.status"
-    "$GPG" --no-tty --command-fd 4 --status-fd 5 "$@" 4<"$WORK/cmd" 5>"$WORK/status" >"$prefix.out" 2>&1 &
+    "$GPG" --no-tty --command-fd 4 --status-fd 5 --no-options --homedir "$HOME_GNUPG" \
+        --pinentry-mode ask --card-edit 4<"$WORK/cmd" 5>"$WORK/status" >"$prefix.out" 2>&1 &
     EDITOR_PID=$!
     # gpg's redirections open cmd, then status; opening them in the same order here keeps
     # either side from waiting on a FIFO the other has not opened yet.
@@ -981,13 +989,19 @@ drive_gpg_editor() {
         kind=${line#'[GNUPG:] '}
         kind=${kind%% *}
         kw=${line##* }
+        answer=
         if [ "$kind" = GET_HIDDEN ]; then
             EDITOR_KEYWORD="$kw (a hidden entry)"
+        elif [ "$kw" = cardedit.prompt ]; then
+            # The editor's own prompt comes once per command, so it may repeat.
+            if [ $# -gt 0 ]; then answer=$1; shift
+            else EDITOR_KEYWORD="$kw (no command is left to give)"; fi
         elif [ "$kw" = "$prev" ]; then
             EDITOR_KEYWORD="$kw (asked again, so gpg rejected the answer)"
         elif ! answer=$("$table" "$kw"); then
             EDITOR_KEYWORD=$kw
-        elif ! printf '%s\n' "$answer" >&7; then
+        fi
+        if [ -z "$EDITOR_KEYWORD" ] && ! printf '%s\n' "$answer" >&7; then
             EDITOR_KEYWORD="$kw (gpg stopped reading answers)"
         fi
         if [ -n "$EDITOR_KEYWORD" ]; then
@@ -1036,20 +1050,28 @@ generate_answer() {
     esac
 }
 
-# card_editor COMMAND TABLE FAILURE: gpg --card-edit admin COMMAND quit, driven with TABLE.
-# Dies with gpg's last lines and FAILURE when gpg fails or asks a question TABLE does not
-# answer.
+# card_editor COMMAND TABLE FAILURE: gpg's card editor given the commands admin, COMMAND and
+# quit, driven with TABLE. Dies through card_editor_failed with FAILURE when gpg fails or asks
+# a question TABLE does not answer.
 card_editor() {
     local cmd=$1 table=$2 failure=$3 prefix=$WORK/card-$1 rc=0
-    drive_gpg_editor "$table" "$prefix" --no-options --homedir "$HOME_GNUPG" --pinentry-mode ask \
-        --card-edit admin "$cmd" quit || rc=$?
+    drive_gpg_editor "$table" "$prefix" admin "$cmd" quit || rc=$?
     [ "$rc" != 0 ] || return 0
-    info "gpg's last lines:"
-    tail -n 8 "$prefix.out" >&2 || true
     if [ "$rc" = 3 ]; then
-        die 1 "gpg --card-edit $cmd asked '$EDITOR_KEYWORD', which this script does not answer, so it stopped gpg at that question. $failure"
+        card_editor_failed "$cmd" "gpg --card-edit $cmd asked '$EDITOR_KEYWORD', which this script does not answer, so it stopped gpg at that question. $failure"
     fi
-    die 1 "gpg --card-edit $cmd failed (exit $rc). $failure"
+    card_editor_failed "$cmd" "gpg --card-edit $cmd failed (exit $rc). $failure"
+}
+
+# card_editor_failed COMMAND MESSAGE: prints the last lines gpg wrote in card_editor COMMAND,
+# keeps WORK after exit so that the rest can be read, and dies with MESSAGE. generate_key also
+# calls it when gpg exited 0 but the card does not read back as COMMAND should have left it.
+card_editor_failed() {
+    local out=$WORK/card-$1.out
+    info "gpg's last lines:"
+    if [ -s "$out" ]; then tail -n 8 "$out" >&2 || true; else info "gpg printed nothing."; fi
+    KEEP_WORK=1
+    die 1 "$2"
 }
 
 # card_key_problem: what is wrong with the key FPR on this YubiKey and in ~/.gnupg, or nothing
@@ -1145,7 +1167,7 @@ generate_key() {
         card_editor key-attr keyattr_answer "Nothing was generated; run again."
         read_card_slot
         card_ecc_ok <<<"$CARD_COLONS" ||
-            die 1 "the key attributes read back as $(card_attrs <<<"$CARD_COLONS") after key-attr, not ECC, Curve 25519; nothing was generated. See the key-attr row of Troubleshooting in $DOC"
+            card_editor_failed key-attr "the key attributes read back as $(card_attrs <<<"$CARD_COLONS") after key-attr, not ECC, Curve 25519; nothing was generated. See the key-attr row of Troubleshooting in $DOC"
         info "key attributes set to $(card_attrs <<<"$CARD_COLONS")"
     fi
     info "Generating the key: pinentry-mac asks for the Admin PIN unless the card still holds it, then for the PIN."
@@ -1153,10 +1175,10 @@ generate_key() {
 
     kill_scdaemons
     read_card_slot
-    [ -n "$CARD_SIG_FPR" ] || die 1 "gpg finished, but the card's signature slot is empty. $partial"
+    [ -n "$CARD_SIG_FPR" ] || card_editor_failed generate "gpg finished, but the card's signature slot is empty. $partial"
     FPR=$CARD_SIG_FPR
     problem=$(card_key_problem)
-    [ -z "$problem" ] || die 1 "$problem. $partial"
+    [ -z "$problem" ] || card_editor_failed generate "$problem. $partial"
     secrets=$(gpg_home --list-secret-keys --with-colons "$FPR" 2>/dev/null | key_block "$FPR")
     [ "$(key_field "$FPR" 2 <<<"$secrets")" = u ] ||
         die 1 "$HOME_GNUPG does not trust $FPR ultimately (validity '$(key_field "$FPR" 2 <<<"$secrets")'), as it does a key gpg generated"
@@ -1673,7 +1695,14 @@ cleanup() {
         info "stopped gpg's card editor; check the YubiKey with gpg --card-status before running again"
     fi
     exec 7>&- 8<&-
-    if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+    [ -n "$WORK" ] || return 0
+    # WORK holds no PIN and no private key: pinentry-mac takes the PINs, and the key never
+    # leaves the card. What card_editor_failed keeps is gpg's output and status lines.
+    if [ "$KEEP_WORK" = 1 ]; then
+        info "gpg's card editor output is kept in $WORK; remove that directory when you are done with it"
+    else
+        rm -rf "$WORK"
+    fi
 }
 
 setup() {

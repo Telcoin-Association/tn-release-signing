@@ -87,8 +87,9 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends git gnupg gpg-agent
-      # Every test runs every step with RELEASE_DRY_RUN=1 on fixture repositories with a
-      # throwaway key, so nothing reaches GitHub or a remote.
+      # The release tests run every step with RELEASE_DRY_RUN=1 on fixture repositories with a
+      # throwaway key, and card_editor_test.sh runs a stand-in for gpg, so nothing reaches
+      # GitHub, a remote or a YubiKey.
       - name: Tests under the runner's bash
         if: matrix.bash == '5'
         run: |
@@ -96,7 +97,7 @@ jobs:
           git --version
           gpg --version | head -n 1
           rc=0
-          for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh; do
+          for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/card_editor_test.sh; do
             bash "$t" || rc=1
           done
           exit "$rc"
@@ -113,7 +114,7 @@ jobs:
             git --version
             gpg --version | head -n 1
             rc=0
-            for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh; do
+            for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/card_editor_test.sh; do
               bash "$t" || rc=1
             done
             exit "$rc"'
