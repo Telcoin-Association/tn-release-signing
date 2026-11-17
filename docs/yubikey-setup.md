@@ -38,6 +38,7 @@ PINs are typed only into the prompts of pinentry-mac and ykman, never into the s
 It generates the key on the YubiKey only after you type `yes`, and it never exports the private key.
 It shows where gpg wrote the revocation certificate and waits while you store it.
 It checks every step by reading the card, the keyring, the files and GitHub back.
+When a card editor step fails or leaves the card unchanged, the script prints gpg's last lines and keeps gpg's output in a temporary directory it names.
 It writes your allowlist file `keys/<handle>.asc` on the current branch and stages it.
 When `KEYS.md` already has a row for your handle it fills that row in and stages it too; otherwise it prints the row for you to add.
 It never commits, pushes or opens the allowlist PR for you.

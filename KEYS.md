@@ -6,7 +6,7 @@ The fingerprint is the primary key's, and every check matches signatures on it.
 
 | Holder | Primary key fingerprint | Role | YubiKey serial | Added | Status |
 |--------|-------------------------|------|----------------|-------|--------|
-| @grantkee | 4E36D35A4AB61B589861D01AC7173F2377CA7573 | main | 37853185 | 2026-10-17 | active |
+| @grantkee | 95A38484E1CBD31D773F6AF928FD56AD2F9FAE47 | main | 37853185 | 2026-11-17 | active |
 | @MavenRain | 32F886ADE9C3A88218E4B67CA0A69159FC76DBFD | main | 16753241 | 2026-11-11 | active |
 
 Holder is the maintainer's GitHub login, which names their file in `keys/`.
