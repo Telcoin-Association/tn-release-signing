@@ -20,10 +20,11 @@ They run only the checks below, never a release step, and a failure from a newer
 - `shellcheck`: `shellcheck -x --severity=error` on every tracked `*.sh` (`release.sh`, `yubikey-setup.sh`, `tests/*.sh`) and on `examples/*.conf`, which release.sh sources once a project copies one to its `release.conf`.
 - `bash32`: `bash -n` of the same files under bash 3.2 in the `bash` image, then a grep for what `bash -n` accepts but 3.2 or macOS cannot run: `declare -A`, `mapfile`, `readarray`, `${x,,}` and `${x^^}`, `sed -i`, GNU `date -d`, `readlink -f`.
   Comment lines are skipped, since the scripts name these constructs to forbid them.
-- `dry-run`: `tests/gitlink_test.sh`, `tests/main_ref_test.sh`, `tests/dry_run_test.sh` and `tests/card_editor_test.sh`, twice.
-  `bash 5` runs them on the runner with `git` and `gnupg` from apt.
+- `dry-run`: `tests/gitlink_test.sh`, `tests/main_ref_test.sh`, `tests/dry_run_test.sh`, `tests/locale_test.sh` and `tests/card_editor_test.sh`, twice.
+  `bash 5` runs them on the runner with `git` and `gnupg` from apt, and with `en_US.UTF-8` generated.
   `bash 3.2` runs them in the `bash` image with git and GnuPG from apk, GNU tar for the build step's deterministic tarball, and `sha256sum` removed, so release.sh checks hashes with `shasum` as it does on a Mac.
-  Every step of the three release tests runs with `RELEASE_DRY_RUN=1` and a throwaway key on fixture repositories, and `tests/dry_run_test.sh` fails if anything ran `gh` or `docker` or pushed a tag.
+  Every step of the four release tests runs with `RELEASE_DRY_RUN=1` and a throwaway key on fixture repositories, and `tests/dry_run_test.sh` fails if anything ran `gh` or `docker` or pushed a tag.
+  `tests/locale_test.sh` renders the release body under `LC_ALL=C` and under `en_US.UTF-8`, whose collations order the key files differently, and requires the two to be equal; `bash 5` sets `T_REQUIRE_LOCALE=1`, so a missing locale fails it, while musl sorts every locale in byte order, so under `bash 3.2` that comparison is skipped.
   `tests/card_editor_test.sh` drives the card editor of `yubikey-setup.sh` against a stand-in for gpg and needs no YubiKey.
 
 ## Updating a pin

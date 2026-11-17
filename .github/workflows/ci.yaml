@@ -82,22 +82,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install git and GnuPG
+      # locale_test.sh needs a locale whose collation differs from byte order.
+      - name: Install git and GnuPG, generate en_US.UTF-8
         if: matrix.bash == '5'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends git gnupg gpg-agent
+          sudo locale-gen en_US.UTF-8
       # The release tests run every step with RELEASE_DRY_RUN=1 on fixture repositories with a
       # throwaway key, and card_editor_test.sh runs a stand-in for gpg, so nothing reaches
       # GitHub, a remote or a YubiKey.
       - name: Tests under the runner's bash
         if: matrix.bash == '5'
+        env:
+          T_REQUIRE_LOCALE: '1'
         run: |
           bash --version | head -n 1
           git --version
           gpg --version | head -n 1
           rc=0
-          for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/card_editor_test.sh; do
+          for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/locale_test.sh tests/card_editor_test.sh; do
             bash "$t" || rc=1
           done
           exit "$rc"
@@ -114,7 +118,7 @@ jobs:
             git --version
             gpg --version | head -n 1
             rc=0
-            for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/card_editor_test.sh; do
+            for t in tests/gitlink_test.sh tests/main_ref_test.sh tests/dry_run_test.sh tests/locale_test.sh tests/card_editor_test.sh; do
               bash "$t" || rc=1
             done
             exit "$rc"'

@@ -549,6 +549,9 @@ primary_fprs() {
 # The threshold KEYS.md states at that commit is checked there too (check_keys_threshold).
 # Sets ALLOW_GNUPGHOME and ALLOW_LIST ("handle<TAB>primary fingerprint", one line per primary
 # key; a file may hold several during a rotation). Thresholds count distinct handles.
+# ALLOW_LIST is in the byte order of the handles, each file's keys in the file's order: a glob
+# sorts in the locale's collation, and render_notes prints ALLOW_LIST as the body's key table,
+# which publish compares line for line with the body another machine wrote.
 load_allowlist() {
     local src where names name file fprs fpr handles repo=. rev gitlink='' missing
     if [ -n "$ALLOW_GNUPGHOME" ]; then return 0; fi
@@ -622,7 +625,7 @@ EOF
         gpg --homedir "$ALLOW_GNUPGHOME" --batch --quiet --import "$file" >/dev/null 2>&1 ||
             die 1 "cannot import $where/$name"
     done
-    ALLOW_LIST=$(cat "$WORK/allowlist.tsv")
+    ALLOW_LIST=$(LC_ALL=C sort -s -t $'\t' -k1,1 "$WORK/allowlist.tsv")
     [ -n "$ALLOW_LIST" ] || die 1 "no maintainer keys in $where"
     handles=$(cut -f1 "$WORK/allowlist.tsv" | LC_ALL=C sort -u | count_lines)
     [ "$THRESHOLD" -le "$handles" ] ||
