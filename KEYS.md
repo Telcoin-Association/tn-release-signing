@@ -8,6 +8,7 @@ The fingerprint is the primary key's, and every check matches signatures on it.
 |--------|-------------------------|------|----------------|-------|--------|
 | @grantkee | 95A38484E1CBD31D773F6AF928FD56AD2F9FAE47 | main | 37853185 | 2026-11-17 | active |
 | @MavenRain | 32F886ADE9C3A88218E4B67CA0A69159FC76DBFD | main | 16753241 | 2026-11-11 | active |
+| @sstanfield | 9D72ECBEE3AA983FA8671DA511423DE08DDE052C | main | 17995570 | 2026-11-20 | active |
 
 Holder is the maintainer's GitHub login, which names their file in `keys/`.
 Role is `main` for the key on the maintainer's everyday YubiKey and `spare` for the key on a spare YubiKey; both keys sit in the holder's one file.
